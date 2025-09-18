@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Live Speech Translator</title>
+  <style>
+    :root{--accent:#5c6bc0;--muted:#666;--bg:#f6f9ff}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:var(--bg); margin:0;padding:24px;display:flex;justify-content:center}
+    .card{width:100%;max-width:760px;background:#fff;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.08);padding:18px}
+    h1{margin:0 0 8px;font-size:20px}
+    p.lead{margin:0 0 16px;color:var(--muted)}
+    .row{display:flex;gap:12px;margin-bottom:12px}
+    select,input{flex:1;padding:10px;border:1px solid #e6e9f0;border-radius:8px;font-size:15px}
+    button{background:var(--accent);color:#fff;border:0;padding:10px 14px;border-radius:8px;cursor:pointer;font-weight:600}
+    button.secondary{background:#f1f3ff;color:#222}
+    .box{background:#fbfdff;border-radius:8px;padding:12px;margin-top:12px;border:1px solid #eef3ff}
+    .label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+    .big {font-size:18px;font-weight:600; margin-top:6px}
+    .status {font-size:13px;color:var(--muted);margin-top:8px}
+    pre {white-space:pre-wrap;word-break:break-word}
+  </style>
+</head>
+<body>
+  <div class="card" id="app">
+    <h1>Live Speech Translator</h1>
+    <p class="lead">Speak (push-to-talk) → translate → hear in the selected language. Works on HTTPS only (GitHub Pages / Vercel).</p>
+
+    <div class="row">
+      <div style="flex:1">
+        <label class="label">Input language (set what you'll speak)</label>
+        <select id="inputLang">
+          <option value="en-US">English (en)</option>
+          <option value="hi-IN">Hindi (hi)</option>
+          <option value="or-IN">Odia (or)</option>
+          <option value="te-IN">Telugu (te)</option>
+          <option value="ta-IN">Tamil (ta)</option>
+        </select>
+      </div>
+
+      <div style="width:220px">
+        <label class="label">Translate to (output)</label>
+        <select id="targetLang">
+          <option value="hi">Hindi (hi)</option>
+          <option value="en">English (en)</option>
+          <option value="or">Odia (or)</option>
+          <option value="te">Telugu (te)</option>
+          <option value="ta">Tamil (ta)</option>
+          <option value="fr">French (fr)</option>
+          <option value="de">German (de)</option>
+          <option value="es">Spanish (es)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="startBtn">Start Speaking (push-to-talk)</button>
+      <button id="stopBtn" class="secondary" disabled>Stop</button>
+    </div>
+
+    <div class="box">
+      <div class="label">Recognized text</div>
+      <div id="recognized" class="big">──</div>
+
+      <div class="label" style="margin-top:8px">Translated text</div>
+      <div id="translated" class="big">──</div>
+
+      <div class="status" id="status">Status: idle</div>
+    </div>
+
+    <div style="margin-top:14px">
+      <div class="label">Notes</div>
+      <ul>
+        <li>Open this page via <strong>HTTPS</strong> (GitHub Pages / Vercel). Chrome/Edge block mic on insecure pages.</li>
+        <li>If translation fails due to CORS/rate-limits, see the "Vercel proxy" option in the deployment guide below.</li>
+      </ul>
+    </div>
+  </div>
+
+<script>
+/* -----------------------------
+   Translator client JS
+   Uses:
+   - Web Speech API for STT (push-to-talk)
+   - LibreTranslate (public) for translation (POST https)
+   - Web SpeechSynthesis for TTS
+   ------------------------------*/
+
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const recognizedEl = document.getElementById('recognized');
+const translatedEl = document.getElementById('translated');
+const statusEl = document.getElementById('status');
+const inputLangSel = document.getElementById('inputLang');
+const targetLangSel = document.getElementById('targetLang');
+
+let recognition = null;
+let isRecording = false;
+
+// map small code -> SpeechSynthesis locale (best-effort)
+const TTS_LANG_MAP = {
+  'hi':'hi-IN','en':'en-US','or':'or-IN','te':'te-IN','ta':'ta-IN',
+  'fr':'fr-FR','de':'de-DE','es':'es-ES'
+};
+
+// Translation endpoint (public libretranslate demo)
+// If you later deploy a proxy (Vercel), replace this URL with '/api/translate'
+const TRANSLATE_ENDPOINT = 'https://libretranslate.de/translate';
+
+function updateStatus(s){ statusEl.textContent = 'Status: ' + s; }
+
+function ensureRecognition() {
+  const S = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!S) {
+    updateStatus('SpeechRecognition not available in this browser.');
+    alert('SpeechRecognition not supported. Use Chrome or Edge.');
+    return null;
+  }
+  recognition = new S();
+  recognition.interimResults = false;
+  recognition.lang = inputLangSel.value; // use selected input language
+  recognition.onresult = async (ev) => {
+    const text = ev.results[0][0].transcript.trim();
+    recognizedEl.textContent = text;
+    updateStatus('Recognized text. Translating...');
+    // translate (use auto-detect on server)
+    try {
+      const payload = { q: text, source: 'auto', target: targetLangSel.value, format: 'text' };
+      const res = await fetch(TRANSLATE_ENDPOINT, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('Translate API returned ' + res.status);
+      const json = await res.json();
+      const translated = json.translatedText || '';
+      translatedEl.textContent = translated || '(no translation)';
+      updateStatus('Playing translated audio...');
+      await speakText(translated, targetLangSel.value);
+      updateStatus('Idle');
+    } catch (err) {
+      console.error('translate error', err);
+      translatedEl.textContent = '(translation failed)';
+      updateStatus('Translation failed');
+    }
+  };
+  recognition.onerror = (e) => {
+    console.warn('recognition error', e);
+    updateStatus('Recognition error: ' + (e.error || 'unknown'));
+  };
+  recognition.onend = () => {
+    // when push-to-talk ends, re-enable start button
+    isRecording = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    updateStatus('Idle');
+  };
+  return recognition;
+}
+
+async function speakText(text, target) {
+  return new Promise(resolve => {
+    if (!text) { resolve(); return; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = TTS_LANG_MAP[target] || (target + '-IN');
+    u.onend = () => resolve();
+    u.onerror = () => resolve();
+    // set rate/pitch if you want: u.rate = 1; u.pitch = 1;
+    window.speechSynthesis.speak(u);
+  });
+}
+
+// UI actions
+startBtn.addEventListener('click', async () => {
+  if (isRecording) return;
+  // Ensure HTTPS, because mic requires secure origin:
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+    alert('Microphone requires HTTPS. Deploy the page to GitHub Pages or Vercel (instructions provided).');
+    return;
+  }
+  // request mic permission explicitly
+  try {
+    await navigator.mediaDevices.getUserMedia({audio:true});
+  } catch (err) {
+    alert('Microphone permission denied or unavailable.');
+    return;
+  }
+
+  if (!recognition) ensureRecognition();
+  recognition.lang = inputLangSel.value;
+  recognition.start();
+  isRecording = true;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  recognizedEl.textContent = 'Listening...';
+  translatedEl.textContent = '──';
+  updateStatus('Listening...');
+});
+
+stopBtn.addEventListener('click', () => {
+  if (recognition && isRecording) recognition.stop();
+  isRecording = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  updateStatus('Stopped by user');
+});
+
+</script>
+</body>
+</html>
